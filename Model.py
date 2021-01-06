@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import math
 import h5py
-
+from keras import backend as K
 
 def embed_diagonal1(inp):
     Batches=[]
@@ -10,9 +10,9 @@ def embed_diagonal1(inp):
         diag_matrix=tf.linalg.diag(batch)
         Batches.append(diag_matrix)
     output=tf.stack(Batches)
-    print(tf.shape(output))
-    return output
 
+    return output
+"""
 def get_loss(y_hat, y):
     loss = tf.keras.losses.BinaryCrossentropy(from_logits=True)(y_hat,y)  
     
@@ -24,7 +24,36 @@ def get_loss(y_hat, y):
     loss = loss - ((2 * tp) / tf.math.reduce_sum((2 * tp + fp + fn + 1e-10)))  # fscore
 
     return loss
+"""
+def weighted_bce(y_true, y_pred):
+  weights = (y_true * 59.) + 1.
+  bce = K.binary_crossentropy(y_true, y_pred)
+  weighted_bce = K.mean(bce * weights)
+  return weighted_bce
+"""
+def get_loss(y_hat, y):
+    # No loss on diagonal
+    y_hat=y_hat.numpy()
+    y=y.numpy()
+    
+    y_hat=torch.from_numpy(y_hat)
+    y=torch.from_numpy(y)
+    B, N, _ = y_hat.shape
+    y_hat[:, torch.arange(N), torch.arange(N)] = torch.finfo(y_hat.dtype).max  # to be "1" after sigmoid
+    # calc loss
+    loss = F.binary_cross_entropy_with_logits(y_hat, y)  # cross entropy
 
+    y_hat = torch.sigmoid(y_hat)
+    tp = (y_hat * y).sum(dim=(1, 2))
+    fn = ((1. - y_hat) * y).sum(dim=(1, 2))
+    fp = (y_hat * (1. - y)).sum(dim=(1, 2))
+    loss = loss - ((2 * tp) / (2 * tp + fp + fn + 1e-10)).sum()  # fscore
+    
+    loss=tf.convert_to_tensor(loss.numpy())
+    print(tf.shape(loss))
+    return loss
+
+"""
 class Attention(tf.keras.Model):
     def __init__(self, in_features):
         super(Attention, self).__init__()
@@ -51,9 +80,9 @@ class DiagOffdiagMLP(tf.keras.Model):
     def __init__(self, in_features, out_features, seperate_diag):
         super(DiagOffdiagMLP, self).__init__()
         self.seperate_diag = seperate_diag
-        self.conv_offdiag = tf.keras.layers.Conv2D(out_features,kernel_size=1,name="conv2d_diag")
+        self.conv_offdiag = tf.keras.layers.Conv2D(out_features,kernel_size=1,)
         if self.seperate_diag:
-            self.conv_diag = tf.keras.layers.Conv1D(out_features, kernel_size=1,name="con1d_diag")
+            self.conv_diag = tf.keras.layers.Conv1D(out_features, kernel_size=1)
     def call(self, inp):
         # Assume x.shape == (B, C, N, N)
         inp_diag=tf.linalg.diag_part(inp)
@@ -80,7 +109,7 @@ class DeepSetLayer(tf.keras.Model):
 
         self.normalization = normalization
         if normalization == 'batchnorm':
-            self.bn = tf.keras.layers.BatchNormalization(out_features)
+            self.bn = tf.keras.layers.BatchNormalization()
 
     def call(self, x):
         #tf.shape(x) = (B,C,N)
@@ -99,8 +128,8 @@ class DeepSetLayer(tf.keras.Model):
             x = self.bn(x)
         else:
             x=tf.transpose(x,perm=[0,1,2])
-            print(x)
-            x = x / tf.norm(x,ord="fro" ,axis=[1,2], keepdims=True)  # BxCxN / Bx1xN
+
+            x = x / tf.norm(x,ord="fro" ,axis=[1,2],keepdims=True)  # BxCxN / Bx1xN
         
         return x
 
@@ -194,23 +223,40 @@ class SetToGraph(tf.keras.Model):
         edge_vals = tf.squeeze(edge_vals,axis=3)
         return edge_vals
 
+
+
+
+    
+
+
 phi=tf.keras.models.Sequential()
 phi.add(tf.keras.layers.InputLayer((256,9)))
 phi.add(SetToGraph(in_features=9,out_features=1,
-                set_fn_feats=[256,256, 256,256, 5],
+                set_fn_feats=[1024,1024, 1024,1024, 5],
                 method='lin2',
                 hidden_mlp=[256],
                 predict_diagonal=False,
                 attention=True))
-phi.compile(optimizer="adam",metrics=["accuracy"],loss=get_loss)
+phi.add(tf.keras.layers.Softmax())
+
+
+phi.compile(optimizer="adam",metrics=["accuracy"],loss=weighted_bce)
 
 phi.summary()
-History=[]
-for n in range(1,150):
-    inputdata=h5py.File("IN"+str(n), "r").get("Tree")[()].astype(np.float16)
-    outputdata=h5py.File("OUT"+str(n), "r").get("Tree")[()].astype(np.float16)
-    callbacks=[]
-    phi.fit(inputdata, outputdata,epochs=5,batch_size=75,callbacks=[callbacks])
-    
-    phi.save("trainedmodel_weights")
-    History.append(callbacks)
+
+
+for n in range(1,5):
+    for i in range(1):
+        inputdata=h5py.File("Data/IN"+str(n), "r").get("Tree")[()]
+        inputdata=np.array_split(inputdata, 2,axis=0)[i]
+        inputdata=inputdata.astype(np.float32)
+        outputdata=h5py.File("Data/OUT"+str(n), "r").get("Tree")[()]
+        outputdata=np.array_split(outputdata, 2,axis=0)[i]
+        outputdata=outputdata.astype(np.float32)
+        
+
+        phi.fit(inputdata, outputdata,epochs=2,batch_size=32)
+
+        phi.save("trainedmodel_weightsV2")
+        del inputdata
+        del outputdata
